@@ -85,7 +85,7 @@ def normalize(host_string, omit_port=False):
     # Get user, host and port separately
     r = host_regex.match(host_string).groupdict()
     # Add any necessary defaults in
-    user = r['user'] or env.get('user')
+    user = r['user'] or env.get('user') or env.get('local_user')
     host = r['host']
     port = r['port'] or '22'
     if omit_port:

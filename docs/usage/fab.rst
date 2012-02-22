@@ -83,12 +83,26 @@ below.
 
 .. _optparse: http://docs.python.org/library/optparse.html
 
-.. cmdoption:: -a
+.. cmdoption:: -a, --no_agent
 
-    Sets :ref:`env.no_agent <no_agent>` to ``True``, forcing Paramiko not to
-    talk to the SSH agent when trying to unlock private key files.
+    Sets :ref:`env.no_agent <no_agent>` to ``True``, forcing our SSH layer not
+    to talk to the SSH agent when trying to unlock private key files.
 
     .. versionadded:: 0.9.1
+
+.. cmdoption:: -A, --forward-agent
+
+    Sets :ref:`env.forward_agent <forward-agent>` to ``True``, enabling agent
+    forwarding.
+
+    .. versionadded:: 1.4
+
+.. cmdoption:: --abort-on-prompts
+
+    Sets :ref:`env.abort_on_prompts <abort-on-prompts>` to ``True``, forcing
+    Fabric to abort whenever it would prompt for input.
+
+    .. versionadded:: 1.1
 
 .. cmdoption:: -c RCFILE, --config=RCFILE
 
@@ -102,6 +116,16 @@ below.
     docstrings are a good idea. (They're *always* a good idea, of course --
     just moreso here.)
 
+.. cmdoption:: --connection-attempts=M, -n M
+
+    Set number of times to attempt connections. Sets
+    :ref:`env.connection_attempts <connection-attempts>`.
+
+    .. seealso::
+        :ref:`env.connection_attempts <connection-attempts>`,
+        :ref:`env.timeout <timeout>`
+    .. versionadded:: 1.4
+
 .. cmdoption:: -D, --disable-known-hosts
 
     Sets :ref:`env.disable_known_hosts <disable-known-hosts>` to ``True``,
@@ -113,7 +137,17 @@ below.
     alternately an explicit file path to load as the fabfile (e.g.
     ``/path/to/my/fabfile.py``.)
 
-.. seealso:: :doc:`fabfiles`
+    .. seealso:: :doc:`fabfiles`
+
+.. cmdoption:: -F LIST_FORMAT, --list-format=LIST_FORMAT
+
+    Allows control over the output format of :option:`--list <-l>`. ``short`` is
+    equivalent to :option:`--shortlist`, ``normal`` is the same as simply
+    omitting this option entirely (i.e. the default), and ``nested`` prints out
+    a nested namespace tree.
+
+    .. versionadded:: 1.1
+    .. seealso:: :option:`--shortlist`, :option:`--list <-l>`
 
 .. cmdoption:: -h, --help
 
@@ -131,6 +165,13 @@ below.
     Sets :ref:`env.hosts <hosts>` to the given comma-delimited list of host
     strings.
 
+.. cmdoption:: -x HOSTS, --exclude-hosts=HOSTS
+
+    Sets :ref:`env.exclude_hosts <exclude-hosts>` to the given comma-delimited
+    list of host strings to then keep out of the final host list.
+
+    .. versionadded:: 1.1
+
 .. cmdoption:: -i KEY_FILENAME
 
     When set to a file path, will load the given file as an SSH identity file
@@ -139,10 +180,22 @@ below.
 
 .. cmdoption:: -k
 
-    Sets :ref:`env.no_keys <no_keys>` to ``True``, forcing Paramiko to not look
-    for SSH private key files in one's home directory.
+    Sets :ref:`env.no_keys <no_keys>` to ``True``, forcing the SSH layer to not
+    look for SSH private key files in one's home directory.
 
     .. versionadded:: 0.9.1
+
+.. cmdoption:: --keepalive=KEEPALIVE
+
+    Sets :ref:`env.keepalive <keepalive>` to the given (integer) value, specifying an SSH keepalive interval.
+
+    .. versionadded:: 1.1
+
+.. cmdoption:: --linewise
+
+    Forces output to be buffered line-by-line instead of byte-by-byte. Often useful or required for :ref:`parallel execution <linewise-output>`.
+
+    .. versionadded:: 1.3
 
 .. cmdoption:: -l, --list
 
@@ -152,13 +205,21 @@ below.
 
     .. versionchanged:: 0.9.1
         Added docstring to output.
-    .. seealso:: :option:`--shortlist`
+    .. seealso:: :option:`--shortlist`, :option:`--list-format <-F>`
 
 .. cmdoption:: -p PASSWORD, --password=PASSWORD
 
     Sets :ref:`env.password <password>` to the given string; it will then be
     used as the default password when making SSH connections or calling the
     ``sudo`` program.
+
+.. cmdoption:: -P, --parallel
+
+    Sets :ref:`env.parallel <env-parallel>` to ``True``, causing
+    tasks to run in parallel.
+
+    .. versionadded:: 1.3
+    .. seealso:: :doc:`/usage/parallel`
 
 .. cmdoption:: --no-pty
 
@@ -179,6 +240,26 @@ below.
     Sets :ref:`env.roles <roles>` to the given comma-separated list of role
     names.
 
+.. cmdoption:: --set KEY=VALUE,...
+
+    Allows you to set default values for arbitrary Fabric env vars. Values set
+    this way have a low precedence -- they will not override more specific env
+    vars which are also specified on the command line. E.g.::
+
+        fab --set password=foo --password=bar
+
+    will result in ``env.password = 'bar'``, not ``'foo'``
+
+    Multiple ``KEY=VALUE`` pairs may be comma-separated, e.g. ``fab --set
+    var1=val1,var2=val2``.
+
+    Other than basic string values, you may also set env vars to True by
+    omitting the ``=VALUE`` (e.g. ``fab --set KEY``), and you may set values to
+    the empty string (and thus a False-equivalent value) by keeping the equals
+    sign, but omitting ``VALUE`` (e.g. ``fab --set KEY=``.)
+
+    .. versionadded:: 1.4
+
 .. cmdoption:: -s SHELL, --shell=SHELL
 
     Sets :ref:`env.shell <shell>` to the given string, overriding the default
@@ -194,10 +275,34 @@ below.
 
 .. cmdoption:: --show=LEVELS
 
-    A comma-separated list of :doc:`output levels <output_controls>` to show by
+    A comma-separated list of :doc:`output levels <output_controls>` to
+    be added to those that are shown by
     default.
 
-.. seealso:: `~fabric.operations.run`, `~fabric.operations.sudo`
+    .. seealso:: `~fabric.operations.run`, `~fabric.operations.sudo`
+
+.. cmdoption:: --ssh-config-path
+
+    Sets :ref:`env.ssh_config_path <ssh-config-path>`.
+
+    .. versionadded:: 1.4
+    .. seealso:: :ref:`ssh-config`
+
+.. cmdoption:: --skip-bad-hosts
+
+    Sets :ref:`env.skip_bad_hosts <skip-bad-hosts>`, causing Fabric to skip
+    unavailable hosts.
+
+    .. versionadded:: 1.4
+
+.. cmdoption:: --timeout=N, -t N
+
+    Set connection timeout in seconds. Sets :ref:`env.timeout <timeout>`.
+
+    .. seealso::
+        :ref:`env.timeout <timeout>`,
+        :ref:`env.connection_attempts <connection-attempts>`
+    .. versionadded:: 1.4
 
 .. cmdoption:: -u USER, --user=USER
 
@@ -212,6 +317,14 @@ below.
 
     Sets :ref:`env.warn_only <warn_only>` to ``True``, causing Fabric to
     continue execution even when commands encounter error conditions.
+
+.. cmdoption:: -z, --pool-size
+
+    Sets :ref:`env.pool_size <pool-size>`, which specifies how many processes
+    to run concurrently during parallel execution.
+
+    .. versionadded:: 1.3
+    .. seealso:: :doc:`/usage/parallel`
 
 
 .. _task-arguments:
@@ -231,7 +344,7 @@ special syntax you can tack onto the end of any task name:
 * Use commas (``,``) to separate arguments from one another (may be escaped
   by using a backslash, i.e. ``\,``);
 * Use equals signs (``=``) for keyword arguments, or omit them for positional
-  arguments;
+  arguments. May also be escaped with backslashes.
 
 Additionally, since this process involves string parsing, all values will end
 up as Python strings, so plan accordingly. (We hope to improve upon this in

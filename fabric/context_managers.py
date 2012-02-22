@@ -85,14 +85,19 @@ def _setenv(**kwargs):
     to be used directly.
     """
     previous = {}
+    new = []
     for key, value in kwargs.iteritems():
         if key in env:
             previous[key] = env[key]
+        else:
+            new.append(key)
         env[key] = value
     try:
         yield
     finally:
         env.update(previous)
+        for key in new:
+            del env[key]
 
 
 def settings(*args, **kwargs):
@@ -320,7 +325,7 @@ def char_buffered(pipe):
 
     Only applies on Unix-based systems; on Windows this is a no-op.
     """
-    if win32 or not sys.stdin.isatty():
+    if win32 or not pipe.isatty():
         yield
     else:
         old_settings = termios.tcgetattr(pipe)

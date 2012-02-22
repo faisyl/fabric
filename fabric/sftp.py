@@ -8,21 +8,20 @@ from fnmatch import filter as fnfilter
 
 from fabric.state import output, connections, env
 from fabric.utils import warn
+from fabric.context_managers import settings
 
 
 class SFTP(object):
     """
-    SFTP helper class, which is also a facade for paramiko.SFTPClient.
+    SFTP helper class, which is also a facade for ssh.SFTPClient.
     """
     def __init__(self, host_string):
         self.ftp = connections[host_string].open_sftp()
-
 
     # Recall that __getattr__ is the "fallback" attribute getter, and is thus
     # pretty safe to use for facade-like behavior as we're doing here.
     def __getattr__(self, attr):
         return getattr(self.ftp, attr)
-
 
     def isdir(self, path):
         try:
@@ -30,13 +29,11 @@ class SFTP(object):
         except IOError:
             return False
 
-
     def islink(self, path):
         try:
             return stat.S_ISLNK(self.ftp.lstat(path).st_mode)
         except IOError:
             return False
-
 
     def exists(self, path):
         try:
@@ -44,7 +41,6 @@ class SFTP(object):
         except IOError:
             return False
         return True
-
 
     def glob(self, path):
         from fabric.state import win32
@@ -59,7 +55,6 @@ class SFTP(object):
             if not win32:
                 ret = [os.path.join(dirpart, name) for name in names]
         return ret
-
 
     def walk(self, top, topdown=True, onerror=None, followlinks=False):
         from os.path import join, isdir, islink
@@ -96,7 +91,6 @@ class SFTP(object):
         if not topdown:
             yield top, dirs, nondirs
 
-
     def mkdir(self, path, use_sudo):
         from fabric.api import sudo, hide
         if use_sudo:
@@ -104,7 +98,6 @@ class SFTP(object):
                 sudo('mkdir %s' % path)
         else:
             self.ftp.mkdir(path)
-
 
     def get(self, remote_path, local_path, local_is_path, rremote=None):
         # rremote => relative remote path, so get(/var/log) would result in
@@ -122,8 +115,8 @@ class SFTP(object):
         if local_is_path:
             # Interpolate, then abspath (to make sure any /// are compressed)
             local_path = os.path.abspath(local_path % path_vars)
-            # Ensure we give Paramiko a file by prepending and/or creating
-            # local directories as appropriate.
+            # Ensure we give ssh.SFTPCLient a file by prepending and/or
+            # creating local directories as appropriate.
             dirpath, filepath = os.path.split(local_path)
             if dirpath and not os.path.exists(dirpath):
                 os.makedirs(dirpath)
@@ -156,7 +149,6 @@ class SFTP(object):
         else:
             result = real_local_path
         return result
-
 
     def get_dir(self, remote_path, local_path):
         # Decide what needs to be stripped from remote paths so they're all
@@ -196,7 +188,6 @@ class SFTP(object):
                 # on both ends.
                 result.append(self.get(rpath, lpath, True, rremote))
         return result
-
 
     def put(self, local_path, remote_path, use_sudo, mirror_local_mode, mode,
         local_is_path):
@@ -247,12 +238,13 @@ class SFTP(object):
                 else:
                     self.ftp.chmod(remote_path, lmode)
         if use_sudo:
-            with hide('everything'):
+            # Temporarily nuke 'cwd' so sudo() doesn't "cd" its mv command.
+            # (The target path has already been cwd-ified elsewhere.)
+            with settings(hide('everything'), cwd=""):
                 sudo("mv \"%s\" \"%s\"" % (remote_path, target_path))
             # Revert to original remote_path for return value's sake
             remote_path = target_path
         return remote_path
-
 
     def put_dir(self, local_path, remote_path, use_sudo, mirror_local_mode,
         mode):
@@ -272,13 +264,13 @@ class SFTP(object):
                 self.mkdir(rcontext, use_sudo)
 
             for d in dirs:
-                n = os.path.join(rcontext,d)
+                n = os.path.join(rcontext, d)
                 if not self.exists(n):
                     self.mkdir(n, use_sudo)
 
             for f in files:
-                local_path = os.path.join(context,f)
-                n = os.path.join(rcontext,f)
+                local_path = os.path.join(context, f)
+                n = os.path.join(rcontext, f)
                 p = self.put(local_path, n, use_sudo, mirror_local_mode, mode,
                     True)
                 remote_paths.append(p)

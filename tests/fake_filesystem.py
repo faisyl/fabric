@@ -3,10 +3,11 @@ import stat
 from StringIO import StringIO
 from types import StringTypes
 
-import paramiko as ssh
+import ssh
 
 
 class FakeFile(StringIO):
+
     def __init__(self, value=None, path=None):
         init = lambda x: StringIO.__init__(self, x)
         if value is None:

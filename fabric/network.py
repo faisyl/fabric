@@ -2,24 +2,34 @@
 Classes and subroutines dealing with network connections and related topics.
 """
 
+from __future__ import with_statement
+
 from functools import wraps
 import getpass
+import os
 import re
 import threading
+import time
 import select
 import socket
 import sys
 
-from fabric.utils import abort
 from fabric.auth import get_password, set_password
+from fabric.utils import abort, handle_prompt_abort
+from fabric.exceptions import NetworkError
 
 try:
     import warnings
     warnings.simplefilter('ignore', DeprecationWarning)
-    import paramiko as ssh
-except ImportError:
-    abort("paramiko is a required module. Please install it:\n\t$ sudo easy_install paramiko")
-
+    import ssh
+except ImportError, e:
+    import traceback
+    traceback.print_exc()
+    print >> sys.stderr, """
+There was a problem importing our SSH library (see traceback above).
+Please make sure all dependencies are installed and importable.
+""".rstrip()
+    sys.exit(1)
 
 
 host_pattern = r'((?P<user>.+)@)?(?P<host>[^:]+)(:(?P<port>\d+))?'
@@ -52,24 +62,95 @@ class HostConnectionCache(dict):
     ``user1@example.com`` will create a connection to ``example.com``, logged
     in as ``user1``; later specifying ``user2@example.com`` will create a new,
     2nd connection as ``user2``.
-    
+
     The same applies to ports: specifying two different ports will result in
     two different connections to the same host being made. If no port is given,
     22 is assumed, so ``example.com`` is equivalent to ``example.com:22``.
     """
-    def __getitem__(self, key):
-        # Normalize given key (i.e. obtain username and port, if not given)
+    def connect(self, key):
+        """
+        Force a new connection to ``key`` host string.
+        """
         user, host, port = normalize(key)
-        # Recombine for use as a key.
-        real_key = join_host_strings(user, host, port)
-        # If not found, create new connection and store it
-        if real_key not in self:
-            self[real_key] = connect(user, host, port)
-        # Return the value either way
-        return dict.__getitem__(self, real_key)
+        key = normalize_to_string(key)
+        self[key] = connect(user, host, port)
+
+    def __getitem__(self, key):
+        """
+        Autoconnect + return connection object
+        """
+        key = normalize_to_string(key)
+        if key not in self:
+            self.connect(key)
+        return dict.__getitem__(self, key)
+
+    #
+    # Dict overrides that normalize input keys
+    #
+
+    def __setitem__(self, key, value):
+        return dict.__setitem__(self, normalize_to_string(key), value)
 
     def __delitem__(self, key):
-        return dict.__delitem__(self, join_host_strings(*normalize(key)))
+        return dict.__delitem__(self, normalize_to_string(key))
+
+    def __contains__(self, key):
+        return dict.__contains__(self, normalize_to_string(key))
+
+
+def ssh_config(host_string=None):
+    """
+    Return ssh configuration dict for current env.host_string host value.
+
+    Memoizes the loaded SSH config file, but not the specific per-host results.
+
+    This function performs the necessary "is SSH config enabled?" checks and
+    will simply return an empty dict if not. If SSH config *is* enabled and the
+    value of env.ssh_config_path is not a valid file, it will abort.
+
+    May give an explicit host string as ``host_string``.
+    """
+    from fabric.state import env
+    if not env.use_ssh_config:
+        return {}
+    if '_ssh_config' not in env:
+        try:
+            conf = ssh.SSHConfig()
+            path = os.path.expanduser(env.ssh_config_path)
+            with open(path) as fd:
+                conf.parse(fd)
+                env._ssh_config = conf
+        except IOError, e:
+            abort("Unable to load SSH config file '%s'" % path)
+    host = parse_host_string(host_string or env.host_string)['host']
+    return env._ssh_config.lookup(host)
+
+
+def key_filenames():
+    """
+    Returns list of SSH key filenames for the current env.host_string.
+
+    Takes into account ssh_config and env.key_filename, including normalization
+    to a list. Also performs ``os.path.expanduser`` expansion on any key
+    filenames.
+    """
+    from fabric.state import env
+    keys = env.key_filename
+    # For ease of use, coerce stringish key filename into list
+    if not isinstance(env.key_filename, (list, tuple)):
+        keys = [keys]
+    # Strip out any empty strings (such as the default value...meh)
+    keys = filter(bool, keys)
+    # Honor SSH config
+    # TODO: fix ssh so it correctly treats IdentityFile as a list
+    conf = ssh_config()
+    if 'identityfile' in conf:
+        keys.append(conf['identityfile'])
+    return map(os.path.expanduser, keys)
+
+
+def parse_host_string(host_string):
+    return host_regex.match(host_string).groupdict()
 
 
 def normalize(host_string, omit_port=False):
@@ -77,28 +158,73 @@ def normalize(host_string, omit_port=False):
     Normalizes a given host string, returning explicit host, user, port.
 
     If ``omit_port`` is given and is True, only the host and user are returned.
+
+    This function will process SSH config files if Fabric is configured to do
+    so, and will use them to fill in some default values or swap in hostname
+    aliases.
+
+    It will also honor ``env.hostdefs`` as an alias map (performed *after* SSH
+    config is processed.)
     """
     from fabric.state import env
     # Gracefully handle "empty" input by returning empty output
     if not host_string:
         return ('', '') if omit_port else ('', '', '')
-    # Get user, host and port separately
-    r = host_regex.match(host_string).groupdict()
-    # Add any necessary defaults in
-    user = r['user'] or env.get('user') or env.get('local_user')
-    host = r['host']
-    port = r['port'] or '22'
+    # Parse host string (need this early on to look up host-specific ssh_config
+    # values)
+    parsed = parse_host_string(host_string)
+    host = parsed['host']
+    # If the host portion exists in hostdefs, expand and use those values
+    # instead (merging as appropriate)
+    if host in env.hostdefs:
+        aliased = parse_host_string(env.hostdefs[host])
+        # Host always gets overridden
+        host = aliased['host']
+        # User, port only get overridden if the new values are non-empty
+        for key in ('user', 'port'):
+            if not parsed[key]:
+                parsed[key] = aliased[key]
+    # Env values (using defaults if somehow earlier defaults were replaced with
+    # empty values)
+    user = env.user or env.local_user
+    port = env.port or env.default_port
+    # SSH config data
+    conf = ssh_config(join_host_strings(user, host, port))
+    # Only use ssh_config values if the env value appears unmodified from
+    # the true defaults. If the user has tweaked them, that new value
+    # takes precedence.
+    if user == env.local_user and 'user' in conf:
+        user = conf['user']
+    if port == env.default_port and 'port' in conf:
+        port = conf['port']
+    # Also override host if needed
+    if 'hostname' in conf:
+        host = conf['hostname']
+    # Merge explicit user/port values with the env/ssh_config derived ones
+    # (Host is already done at this point.)
+    user = parsed['user'] or user
+    port = parsed['port'] or port
     if omit_port:
         return user, host
     return user, host, port
+
+
+def to_dict(host_string):
+    user, host, port = normalize(host_string)
+    return {
+        'user': user, 'host': host, 'port': port, 'host_string': host_string
+    }
+
+def from_dict(arg):
+    return join_host_strings(arg['user'], arg['host'], arg['port'])
 
 
 def denormalize(host_string):
     """
     Strips out default values for the given host string.
 
-    If the user part is the default user, it is removed; if the port is port 22,
-    it also is removed.
+    If the user part is the default user, it is removed;
+    if the port is port 22, it also is removed.
     """
     from state import env
     r = host_regex.match(host_string).groupdict()
@@ -115,8 +241,8 @@ def join_host_strings(user, host, port=None):
     """
     Turns user/host/port strings into ``user@host:port`` combined string.
 
-    This function is not responsible for handling missing user/port strings; for
-    that, see the ``normalize`` function.
+    This function is not responsible for handling missing user/port strings;
+    for that, see the ``normalize`` function.
 
     If ``port`` is omitted, the returned string will be of the form
     ``user@host``.
@@ -127,11 +253,18 @@ def join_host_strings(user, host, port=None):
     return "%s@%s%s" % (user, host, port_string)
 
 
+def normalize_to_string(host_string):
+    """
+    normalize() returns a tuple; this returns another valid host string.
+    """
+    return join_host_strings(*normalize(host_string))
+
+
 def connect(user, host, port):
     """
     Create and return a new SSHClient instance connected to given host.
     """
-    from state import env
+    from state import env, output
 
     #
     # Initialization
@@ -147,7 +280,6 @@ def connect(user, host, port):
     if not env.reject_unknown_hosts:
         client.set_missing_host_key_policy(ssh.AutoAddPolicy())
 
-
     #
     # Connection attempt loop
     #
@@ -155,28 +287,35 @@ def connect(user, host, port):
     # Initialize loop variables
     connected = False
     password = get_password()
+    tries = 0
 
     # Loop until successful connect (keep prompting for new password)
     while not connected:
         # Attempt connection
         try:
+            tries += 1
             client.connect(
                 hostname=host,
                 port=int(port),
                 username=user,
                 password=password,
-                key_filename=env.key_filename,
-                timeout=10,
+                key_filename=key_filenames(),
+                timeout=env.timeout,
                 allow_agent=not env.no_agent,
                 look_for_keys=not env.no_keys
             )
             connected = True
+
+            # set a keepalive if desired
+            if env.keepalive:
+                client.get_transport().set_keepalive(env.keepalive)
+
             return client
         # BadHostKeyException corresponds to key mismatch, i.e. what on the
         # command line results in the big banner error about man-in-the-middle
         # attacks.
-        except ssh.BadHostKeyException:
-            abort("Host key for %s did not match pre-existing key! Server's key was changed recently, or possible man-in-the-middle attack." % env.host)
+        except ssh.BadHostKeyException, e:
+            raise NetworkError("Host key for %s did not match pre-existing key! Server's key was changed recently, or possible man-in-the-middle attack." % host, e)
         # Prompt for new password to try on auth failure
         except (
             ssh.AuthenticationException,
@@ -190,21 +329,21 @@ def connect(user, host, port):
             # SSHException and there *was* a password -- it is probably
             # something non auth related, and should be sent upwards.
             if e.__class__ is ssh.SSHException and password:
-                abort(str(e))
+                raise NetworkError(str(e), e)
 
             # Otherwise, assume an auth exception, and prompt for new/better
             # password.
 
-            # Paramiko doesn't handle prompting for locked private keys (i.e.
-            # keys with a passphrase and not loaded into an agent) so we have
-            # to detect this and tweak our prompt slightly.  (Otherwise,
-            # however, the logic flow is the same, because Paramiko's connect()
-            # method overrides the password argument to be either the login
-            # password OR the private key passphrase. Meh.)
+            # The 'ssh' library doesn't handle prompting for locked private
+            # keys (i.e.  keys with a passphrase and not loaded into an agent)
+            # so we have to detect this and tweak our prompt slightly.
+            # (Otherwise, however, the logic flow is the same, because
+            # ssh's connect() method overrides the password argument to be
+            # either the login password OR the private key passphrase. Meh.)
             #
             # NOTE: This will come up if you normally use a
             # passphrase-protected private key with ssh-agent, and enter an
-            # incorrect remote username, because Paramiko:
+            # incorrect remote username, because ssh.connect:
             # * Tries the agent first, which will fail as you gave the wrong
             # username, so obviously any loaded keys aren't gonna work for a
             # nonexistent remote account;
@@ -213,11 +352,11 @@ def connect(user, host, port):
             # because you didn't enter a password, because you're using
             # ssh-agent;
             # * In this condition (trying a key file, password is None)
-            # Paramiko raises PasswordRequiredException.
+            # ssh raises PasswordRequiredException.
             text = None
             if e.__class__ is ssh.PasswordRequiredException:
                 # NOTE: we can't easily say WHICH key's passphrase is needed,
-                # because Paramiko doesn't provide us with that info, and
+                # because ssh doesn't provide us with that info, and
                 # env.key_filename may be a list of keys, so we can't know
                 # which one raised the exception. Best not to try.
                 prompt = "[%s] Passphrase for private key"
@@ -230,22 +369,47 @@ def connect(user, host, port):
             # Print a newline (in case user was sitting at prompt)
             print('')
             sys.exit(0)
-        # Handle timeouts
-        except socket.timeout:
-            abort('Timed out trying to connect to %s' % host)
         # Handle DNS error / name lookup failure
-        except socket.gaierror:
-            abort('Name lookup failed for %s' % host)
-        # Handle generic network-related errors
+        except socket.gaierror, e:
+            raise NetworkError('Name lookup failed for %s' % host, e)
+        # Handle timeouts and retries, including generic errors
         # NOTE: In 2.6, socket.error subclasses IOError
         except socket.error, e:
-            abort('Low level socket error connecting to host %s: %s' % (
-                host, e[1])
-            )
+            not_timeout = type(e) is not socket.timeout
+            giving_up = tries >= env.connection_attempts
+            # Baseline error msg for when debug is off
+            msg = "Timed out trying to connect to %s" % host
+            # Expanded for debug on
+            err = msg + " (attempt %s of %s)" % (tries, env.connection_attempts)
+            if giving_up:
+                err += ", giving up"
+            err += ")"
+            # Debuggin'
+            if output.debug:
+                print >>sys.stderr, err
+            # Having said our piece, try again
+            if not giving_up:
+                # Sleep if it wasn't a timeout, so we still get timeout-like
+                # behavior
+                if not_timeout:
+                    time.sleep(env.timeout)
+                continue
+            # Override eror msg if we were retrying other errors
+            if not_timeout:
+                msg = "Low level socket error connecting to host %s: %s" % (
+                    host, e[1]
+                )
+            # Here, all attempts failed. Tweak error msg to show # tries.
+            # TODO: find good humanization module, jeez
+            s = "s" if env.connection_attempts > 1 else ""
+            msg += " (tried %s time%s)" % (env.connection_attempts, s)
+            raise NetworkError(msg, e)
+
 
 def prompt_for_password(prompt=None, no_colon=False, stream=None):
     """
-    Prompts for and returns a new password if required; otherwise, returns None.
+    Prompts for and returns a new password if required; otherwise, returns
+    None.
 
     A trailing colon is appended unless ``no_colon`` is True.
 
@@ -260,6 +424,7 @@ def prompt_for_password(prompt=None, no_colon=False, stream=None):
     defaults to ``sys.stderr``.
     """
     from fabric.state import env
+    handle_prompt_abort("a connection or sudo password")
     stream = stream or sys.stderr
     # Construct prompt
     default = "[%s] Login password" % env.host_string
@@ -284,7 +449,7 @@ def needs_host(func):
     This decorator is basically a safety net for silly users who forgot to
     specify the host/host list in one way or another. It should be used to wrap
     operations which require a network connection.
-    
+
     Due to how we execute commands per-host in ``main()``, it's not possible to
     specify multiple hosts at this point in time, so only a single host will be
     prompted for.
@@ -298,29 +463,12 @@ def needs_host(func):
     @wraps(func)
     def host_prompting_wrapper(*args, **kwargs):
         while not env.get('host_string', False):
-            host_string = raw_input("No hosts found. Please specify (single) host string for connection: ")
-            interpret_host_string(host_string)
+            handle_prompt_abort("the target host connection string")
+            host_string = raw_input("No hosts found. Please specify (single)"
+                                    " host string for connection: ")
+            env.update(to_dict(host_string))
         return func(*args, **kwargs)
     return host_prompting_wrapper
-
-
-def interpret_host_string(host_string):
-    """
-    Apply given host string to the env dict.
-
-    Split it into hostname, username and port (using
-    `~fabric.network.normalize`) and store the full host string plus its
-    constituent parts into the appropriate env vars.
-
-    Returns the parts as split out by ``normalize`` for convenience.
-    """
-    from fabric.state import env
-    username, hostname, port = normalize(host_string)
-    env.host_string = host_string
-    env.host = hostname
-    env.user = username
-    env.port = port
-    return username, hostname, port
 
 
 def disconnect_all():

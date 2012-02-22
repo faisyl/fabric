@@ -14,7 +14,7 @@ from StringIO import StringIO
 from functools import wraps
 from Python26SocketServer import BaseRequestHandler, ThreadingMixIn, TCPServer
 
-import paramiko as ssh
+import ssh
 
 from fabric.operations import _sudo_prefix
 from fabric.api import env, hide
@@ -56,7 +56,11 @@ fabfile.pyc
 fabric
 requirements.txt
 setup.py
-tests"""
+tests""",
+    "both_streams": [
+        "stdout",
+        "stderr"
+    ]
 }
 FILES = FakeFilesystem({
     '/file.txt': 'contents',
@@ -67,7 +71,7 @@ FILES = FakeFilesystem({
     '/tree/file2.txt': 'y',
     '/tree/subfolder/file3.txt': 'z',
     '/etc/apache2/apache2.conf': 'Include other.conf',
-    HOME: None # So $HOME is a directory
+    HOME: None  # So $HOME is a directory
 })
 PASSWORDS = {
     'root': 'root',
@@ -97,9 +101,9 @@ def _equalize(lists, fillval=None):
     return lists
 
 
-class ParamikoServer(ssh.ServerInterface):
+class TestServer(ssh.ServerInterface):
     """
-    Test-ready server implementing Paramiko's server interface parent class.
+    Test server implementing the 'ssh' lib's server interface parent class.
 
     Mostly just handles the bare minimum necessary to handle SSH-level things
     such as honoring authentication types and exec/shell/etc requests.
@@ -139,7 +143,7 @@ class ParamikoServer(ssh.ServerInterface):
 
     def check_auth_publickey(self, username, key):
         self.username = username
-        return ssh.AUTH_SUCCESSFUL if self.pubkeys else ssh.AUTH_FAILED 
+        return ssh.AUTH_SUCCESSFUL if self.pubkeys else ssh.AUTH_FAILED
 
     def get_allowed_auths(self, username):
         return 'password,publickey'
@@ -151,7 +155,7 @@ class SSHServer(ThreadingMixIn, TCPServer):
     """
     def _socket_info(self, addr_tup):
         """
-        Clone of the very top of Paramiko (1.7.6) SSHClient.connect().
+        Clone of the very top of Paramiko 1.7.6 SSHClient.connect().
 
         We must use this in order to make sure that our address family matches
         up with the client side (which we cannot control, and which varies
@@ -202,6 +206,7 @@ class PrependList(list):
     def prepend(self, val):
         self.insert(0, val)
 
+
 def expand(path):
     """
     '/foo/bar/biz' => ('/', 'foo', 'bar', 'biz')
@@ -220,12 +225,14 @@ def expand(path):
     ret.prepend(directory if directory == os.path.sep else '')
     return ret
 
+
 def contains(folder, path):
     """
     contains(('a', 'b', 'c'), ('a', 'b')) => True
     contains('a', 'b', 'c'), ('f',)) => False
     """
     return False if len(path) >= len(folder) else folder[:len(path)] == path
+
 
 def missing_folders(paths):
     """
@@ -236,7 +243,7 @@ def missing_folders(paths):
     for path in paths:
         expanded = expand(path)
         for i in range(len(expanded)):
-            folder = os.path.join(*expanded[:len(expanded)-i])
+            folder = os.path.join(*expanded[:len(expanded) - i])
             if folder and folder not in pool:
                 pool.add(folder)
                 ret.append(folder)
@@ -272,7 +279,7 @@ class FakeSFTPServer(ssh.SFTPServerInterface):
         candidates = [x for x in expanded_files if contains(x, expanded_path)]
         children = []
         for candidate in candidates:
-            cut = candidate[:len(expanded_path)+1]
+            cut = candidate[:len(expanded_path) + 1]
             if cut not in children:
                 children.append(cut)
         results = [self.stat(os.path.join(*x)) for x in children]
@@ -325,6 +332,7 @@ class FakeSFTPServer(ssh.SFTPServerInterface):
     def mkdir(self, path, attr):
         self.files[path] = None
         return ssh.SFTP_OK
+
 
 def serve_responses(responses, files, passwords, home, pubkeys, port):
     """
@@ -387,7 +395,7 @@ def serve_responses(responses, files, passwords, home, pubkeys, port):
             transport.add_server_key(ssh.RSAKey(filename=SERVER_PRIVKEY))
             transport.set_subsystem_handler('sftp', ssh.SFTPServer,
                 sftp_si=FakeSFTPServer)
-            server = ParamikoServer(passwords, home, pubkeys, files)
+            server = TestServer(passwords, home, pubkeys, files)
             transport.start_server(server=server)
             self.ssh_server = server
             self.transport = transport

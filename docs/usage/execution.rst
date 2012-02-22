@@ -12,21 +12,15 @@ a scenario requires specific rules for when and how tasks are executed.
 This document explores Fabric's execution model, including the main execution
 loop, how to define host lists, how connections are made, and so forth.
 
-.. note::
-
-    Most of this material applies to the :doc:`fab <fab>` tool only, as this
-    mode of use has historically been the main focus of Fabric's development.
-    When writing version 0.9 we straightened out Fabric's internals to make it
-    easier to use as a library, but there's still work to be done before this
-    is as flexible and easy as we'd like it to be.
 
 .. _execution-strategy:
 
 Execution strategy
 ==================
 
-Fabric currently provides a single, serial execution method, though more
-options are planned for the future:
+Fabric defaults to a single, serial execution method, though there is an
+alternative parallel mode available as of Fabric 1.3 (see
+:doc:`/usage/parallel`). This default behavior is as follows:
 
 * A list of tasks is created. Currently this list is simply the arguments given
   to :doc:`fab <fab>`, preserving the order given.
@@ -67,74 +61,10 @@ you may introspect the output or return code of a given command and decide what
 to do next.
 
 
-.. _tasks-and-imports:
-
 Defining tasks
 ==============
 
-When looking for tasks to execute, Fabric imports your fabfile and will
-consider any callable object, **except** for the following:
-
-* Callables whose name starts with an underscore (``_``). In other words,
-  Python's usual "private" convention holds true here.
-* Callables defined within Fabric itself. Fabric's own functions such as
-  `~fabric.operations.run` and `~fabric.operations.sudo`  will not show up in
-  your task list.
-
-.. note::
-
-    To see exactly which callables in your fabfile may be executed via ``fab``,
-    use :option:`fab --list <-l>`.
-
-Imports
--------
-
-Python's ``import`` statement effectively includes the imported objects in your
-module's namespace. Since Fabric's fabfiles are just Python modules, this means
-that imports are also considered as possible tasks, alongside anything defined
-in the fabfile itself.
-
-Because of this, we strongly recommend that you use the ``import module`` form
-of importing, followed by ``module.callable()``, which will result in a cleaner
-fabfile API than doing ``from module import callable``.
-
-For example, here's a sample fabfile which uses ``urllib.urlopen`` to get some
-data out of a webservice::
-
-    from urllib import urlopen
-
-    from fabric.api import run
-
-    def webservice_read():
-        objects = urlopen('http://my/web/service/?foo=bar').read().split()
-        print(objects)
-
-This looks simple enough, and will run without error. However, look what
-happens if we run :option:`fab --list <-l>` on this fabfile::
-
-    $ fab --list
-    Available commands:
-
-      webservice_read   List some directories.   
-      urlopen           urlopen(url [, data]) -> open file-like object
-
-Our fabfile of only one task is showing two "tasks", which is bad enough, and
-an unsuspecting user might accidentally try to call ``fab urlopen``, which
-probably won't work very well. Imagine any real-world fabfile, which is likely
-to be much more complex, and hopefully you can see how this could get messy
-fast.
-
-For reference, here's the recommended way to do it::
-
-    import urllib
-
-    from fabric.api import run
-
-    def webservice_read():
-        objects = urllib.urlopen('http://my/web/service/?foo=bar').read().split()
-        print(objects)
-
-It's a simple change, but it'll make anyone using your fabfile a bit happier.
+For details on what constitutes a Fabric task and how to organize them, please see :doc:`/usage/tasks`.
 
 
 Defining host lists
@@ -165,6 +95,57 @@ username, and/or port 22, respectively. Thus, ``admin@foo.com:222``,
 During execution, Fabric normalizes the host strings given and then stores each
 part (username/hostname/port) in the environment dictionary, for both its use
 and for tasks to reference if the need arises. See :doc:`env` for details.
+
+.. _host-aliases:
+
+Host aliases
+~~~~~~~~~~~~
+
+Fabric supports the concept of "host aliases", which lets you set up more
+usable references to longer or harder to remember host strings. This is highly
+similar to using ``Host`` and ``HostName`` directives in :ref:`SSH config files
+<ssh-config>`, and in most cases using that feature instead will be more
+generally useful (since your regular SSH client can use those aliases too.)
+Fabric's native host aliasing is intended for situations where defining the
+alias map at the Python level is required (e.g. dynamically defined based on
+some other data source.)
+
+Host aliases are implemented as a mapping in :ref:`env.hostdefs
+<env-hostdefs>`, where host strings equal to the mapping's key will be replaced
+at connection time with the appropriate value. For example, this sample fabfile
+allows use of ``"web1"`` in various places, which will be replaced with
+``"web1.example.com"`` automatically::
+
+    from fabric.api import env, hosts, task
+
+    env.hostdefs = {"web1": "web1.example.com"}
+
+    @task
+    @hosts("web1")
+    def mytask():
+        run("This will execute against web1.example.com")
+
+Some notes:
+
+* The values in ``env.hostdefs`` are normal :ref:`host strings <host-strings>`
+  and may include user and/or port specifiers if desired.
+* If a reference *to* an alias includes user or port specifiers, they are
+  preserved after replacement. E.g. in the above example, one could refer to
+  ``"admin@web1"`` and it would result in ``"admin@web1.example.com"``.
+
+  * This includes overriding explicit user/port specifiers in the alias value,
+    so with a ``hostdefs`` of ``{"db": "dbuser@db.example.com"}``, references
+    to ``"myotheruser@db"`` expands to ``"myotheruser@db.example.com"`` and
+    **not** to ``"dbuser@db.example.com"``.
+
+* Host alias replacement occurs before :ref:`SSH config file directives
+  <ssh-config>` are processed, so in the event that a given alias maps to both
+  ``env.hostdefs`` **and** an SSH config ``Host`` directive, the ``hostdefs``
+  replacement "wins."
+* Similarly, if an ``env.hostdefs`` *value* ends up mapping to an SSH config
+  ``Host`` directive, the SSH-config-level replacement will also take place
+  (thus presenting a 2nd potential "level" of aliasing.)
+
 
 Roles
 -----
@@ -265,10 +246,10 @@ look up in ``env.roledefs``.
 Globally, via the command line
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-In addition to modifying ``env.hosts`` and ``env.roles`` at the module level,
-you may define them by passing comma-separated string arguments to the
-command-line switches :option:`--hosts/-H <-H>` and :option:`--roles/-R <-R>`,
-e.g.::
+In addition to modifying ``env.hosts``, ``env.roles``, and
+``env.exclude_hosts`` at the module level, you may define them by passing
+comma-separated string arguments to the command-line switches
+:option:`--hosts/-H <-H>` and :option:`--roles/-R <-R>`, e.g.::
 
     $ fab -H host1,host2 mytask
 
@@ -298,7 +279,7 @@ instead::
         run('ls /var/www')
 
 When this fabfile is run as ``fab -H host1,host2 mytask``, ``env.hosts`` will
-end contain ``['host1', 'host2', 'host3', 'host4']`` at the time that
+then contain ``['host1', 'host2', 'host3', 'host4']`` at the time that
 ``mytask`` is executed.
 
 .. note::
@@ -374,7 +355,6 @@ on a host list of ``['host1', 'host2']``.
 However, decorator host lists do **not** override per-task command-line
 arguments, as given in the previous section.
 
-
 Order of precedence
 ~~~~~~~~~~~~~~~~~~~
 
@@ -424,6 +404,140 @@ Assuming no command-line hosts or roles are given when ``mytask`` is executed,
 this fabfile will call ``mytask`` on a host list of ``['a', 'b', 'c']`` -- the
 union of ``role1`` and the contents of the `~fabric.decorators.hosts` call.
 
+.. _excluding-hosts:
+
+Excluding specific hosts
+------------------------
+
+At times, it is useful to exclude one or more specific hosts, e.g. to override
+a few bad or otherwise undesirable hosts which are pulled in from a role or an
+autogenerated host list.
+
+.. note::
+    As of Fabric 1.4, you may wish to use :ref:`skip-bad-hosts` instead, which
+    automatically skips over any unreachable hosts.
+
+Host exclusion may be accomplished globally with :option:`--exclude-hosts/-x
+<-x>`::
+
+    $ fab -R myrole -x host2,host5 mytask
+
+If ``myrole`` was defined as ``['host1', 'host2', ..., 'host15']``, the above
+invocation would run with an effective host list of ``['host1', 'host3',
+'host4', 'host6', ..., 'host15']``.
+
+    .. note::
+        Using this option does not modify ``env.hosts`` -- it only causes the
+        main execution loop to skip the requested hosts.
+
+Exclusions may be specified per-task by using an extra ``exclude_hosts`` kwarg,
+which is implemented similarly to the abovementioned ``hosts`` and ``roles``
+per-task kwargs, in that it is stripped from the actual task invocation. This
+example would have the same result as the global exclude above::
+
+    $ fab mytask:roles=myrole,exclude_hosts="host2;host5"
+
+Note that the host list is semicolon-separated, just as with the ``hosts``
+per-task argument.
+
+Combining exclusions
+~~~~~~~~~~~~~~~~~~~~
+
+Host exclusion lists, like host lists themselves, are not merged together
+across the different "levels" they can be declared in. For example, a global
+``-x`` option will not affect a per-task host list set with a decorator or
+keyword argument, nor will per-task ``exclude_hosts`` keyword arguments affect
+a global ``-H`` list.
+
+There is one minor exception to this rule, namely that CLI-level keyword
+arguments (``mytask:exclude_hosts=x,y``) **will** be taken into account when
+examining host lists set via ``@hosts`` or ``@roles``. Thus a task function
+decorated with ``@hosts('host1', 'host2')`` executed as ``fab
+taskname:exclude_hosts=host2`` will only run on ``host1``.
+
+As with the host list merging, this functionality is currently limited (partly
+to keep the implementation simple) and may be expanded in future releases.
+
+
+.. _execute:
+
+Intelligently executing tasks with ``execute``
+==============================================
+
+.. versionadded:: 1.3
+
+Most of the information here involves "top level" tasks executed via :doc:`fab
+<fab>`, such as the first example where we called ``fab taskA taskB``.
+However, it's often convenient to wrap up multi-task invocations like this into
+their own, "meta" tasks.
+
+Prior to Fabric 1.3, this had to be done by hand, as outlined in
+:doc:`/usage/library`. Fabric's design eschews magical behavior, so simply
+*calling* a task function does **not** take into account decorators such as
+`~fabric.decorators.roles`.
+
+New in Fabric 1.3 is the `~fabric.tasks.execute` helper function, which takes a
+task object or name as its first argument. Using it is effectively the same as
+calling the given task from the command line: all the rules given above in
+:ref:`host-lists` apply. (The ``hosts`` and ``roles`` keyword arguments to
+`~fabric.tasks.execute` are analogous to :ref:`CLI per-task arguments
+<hosts-per-task-cli>`, including how they override all other host/role-setting
+methods.)
+
+As an example, here's a fabfile defining two stand-alone tasks for deploying a
+Web application::
+
+    from fabric.api import run, roles
+
+    env.roledefs = {
+        'db': ['db1', 'db2'],
+        'web': ['web1', 'web2', 'web3'],
+    }
+
+    @roles('db')
+    def migrate():
+        # Database stuff here.
+        pass
+
+    @roles('web')
+    def update():
+        # Code updates here.
+        pass
+
+In Fabric <=1.2, the only way to ensure that ``migrate`` runs on the DB servers
+and that ``update`` runs on the Web servers (short of manual
+``env.host_string`` manipulation) was to call both as top level tasks::
+
+    $ fab migrate update
+
+Fabric >=1.3 can use `~fabric.tasks.execute` to set up a meta-task. Update the
+``import`` line like so::
+
+    from fabric.api import run, roles, execute
+
+and append this to the bottom of the file::
+
+    def deploy():
+        execute(migrate)
+        execute(update)
+
+That's all there is to it; the `~fabric.decorators.roles` decorators will be honored as expected, resulting in the following execution sequence:
+
+* `migrate` on `db1`
+* `migrate` on `db2`
+* `update` on `web1`
+* `update` on `web2`
+* `update` on `web3`
+
+.. warning::
+    This technique works because tasks that themselves have no host list (this
+    includes the global host list settings) only run one time. If used inside a
+    "regular" task that is going to run on multiple hosts, calls to
+    `~fabric.tasks.execute` will also run multiple times, resulting in
+    multiplicative numbers of subtask calls -- be careful!
+
+.. seealso:: `~fabric.tasks.execute`
+
 
 .. _failures:
 
@@ -444,6 +558,7 @@ immediately. However, if ``env.warn_only`` is set to ``True`` at the time of
 failure -- with, say, the `~fabric.context_managers.settings` context
 manager -- Fabric will emit a warning message but continue executing.
 
+
 .. _connections:
 
 Connections
@@ -452,7 +567,9 @@ Connections
 ``fab`` itself doesn't actually make any connections to remote hosts. Instead,
 it simply ensures that for each distinct run of a task on one of its hosts, the
 env var ``env.host_string`` is set to the right value. Users wanting to
-leverage Fabric as a library may do so manually to achieve similar effects.
+leverage Fabric as a library may do so manually to achieve similar effects
+(though as of Fabric 1.3, using `~fabric.tasks.execute` is preferred and more
+powerful.)
 
 ``env.host_string`` is (as the name implies) the "current" host string, and is
 what Fabric uses to determine what connections to make (or re-use) when
@@ -466,7 +583,6 @@ dictionary which maps host strings to SSH connection objects.
     ``fabric.state.connections``) acts as a cache, opting to return previously
     created connections if possible in order to save some overhead, and
     creating new ones otherwise.
-
 
 Lazy connections
 ----------------
@@ -517,11 +633,26 @@ before their program exits. This can be accomplished by calling
 `~fabric.network.disconnect_all` at the end of your script.
 
 .. note::
-
     `~fabric.network.disconnect_all` may be moved to a more public location in
     the future; we're still working on making the library aspects of Fabric
     more solidified and organized.
 
+Multiple connection attempts and skipping bad hosts
+---------------------------------------------------
+
+As of Fabric 1.4, multiple attempts may be made to connect to remote servers
+before aborting with an error: Fabric will try connecting
+:ref:`env.connection_attempts <connection-attempts>` times before giving up,
+with a timeout of :ref:`env.timeout <timeout>` seconds each time. (These
+currently default to 1 try and 10 seconds, to match previous behavior, but they
+may be safely changed to whatever you need.)
+
+Furthermore, even total failure to connect to a server is no longer an absolute
+hard stop: set :ref:`env.skip_bad_hosts <skip-bad-hosts>` to ``True`` and in
+most situations (typically initial connections) Fabric will simply warn and
+continue, instead of aborting.
+
+.. versionadded:: 1.4
 
 .. _password-management:
 
@@ -558,3 +689,46 @@ value for the current value of ``env.host_string``.
 .. [#] We highly recommend the use of SSH `key-based access
     <http://en.wikipedia.org/wiki/Public_key>`_ instead of relying on
     homogeneous password setups, as it's significantly more secure.
+
+
+.. _ssh-config:
+
+Leveraging native SSH config files
+==================================
+
+Command-line SSH clients (such as the one provided by `OpenSSH
+<http://openssh.org>`_) make use of a specific configuration format typically
+known as ``ssh_config``, and will read from a file in the platform-specific
+location ``$HOME/.ssh/config`` (or an arbitrary path given to
+:option:`--ssh-config-path`/:ref:`env.ssh_config_path <ssh-config-path>`.) This
+file allows specification of various SSH options such as default or per-host
+usernames, hostname aliases, and toggling other settings (such as whether to
+use :ref:`agent forwarding <forward-agent>`.)
+
+Fabric's SSH implementation allows loading a subset of these options from one's
+actual SSH config file, should it exist. This behavior is not enabled by
+default (in order to be backwards compatible) but may be turned on by setting
+:ref:`env.use_ssh_config <use-ssh-config>` to ``True`` at the top of your
+fabfile.
+
+If enabled, the following SSH config directives will be loaded and honored by Fabric:
+
+* ``User`` and ``Port`` will be used to fill in the appropriate connection
+  parameters when not otherwise specified, in the following fashion:
+
+  * Globally specified ``User``/``Port`` will be used in place of the current
+    defaults (local username and 22, respectively) if the appropriate env vars
+    are not set.
+  * However, if :ref:`env.user <user>`/:ref:`env.port <port>` *are* set, they
+    override global ``User``/``Port`` values.
+  * User/port values in the host string itself (e.g. ``hostname:222``) will
+    override everything, including any ``ssh_config`` values.
+* ``HostName`` can be used to replace the given hostname, just like with
+  regular ``ssh``. So a ``Host foo`` entry specifying ``HostName example.com``
+  will allow you to give Fabric the hostname ``'foo'`` and have that expanded
+  into ``'example.com'`` at connection time.
+* ``IdentityFile`` will append to (not replace) :ref:`env.key_filename
+  <key-filename>`.
+* ``ForwardAgent`` will augment :ref:`env.forward_agent <forward-agent>` in an
+  "OR" manner: if either is set to a positive value, agent forwarding will be
+  enabled.
